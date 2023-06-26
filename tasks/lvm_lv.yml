@@ -1,0 +1,45 @@
+---
+#
+# Create LV when the size 100%. lv_lv is the name for the logical volume
+#
+- name: Must run under root
+  become: true
+  block:
+
+    - name: Create logical volume and update them when they are defined as 100%
+      community.general.lvol:
+        lv: "{{ _lv_name }}"
+        shrink: false
+        size: "100%VG"
+        vg: "{{ _vg_name }}"
+      when: _lv_size == "100%"
+    #
+    # Do the same as above for case where the size is defined as an integer. The logical volume will have the size of the
+    # integer in GB's
+    #
+    - name: Create logical volume and update them when they are defined as an integer
+      community.general.lvol:
+        lv: "{{ _lv_name }}"
+        shrink: false
+        size: "{{ _lv_size }}G"
+        vg: "{{ _vg_name }}"
+      when: _lv_size != "100%"
+    #
+    # Format volume. vg is the volume group name, single_lv.key is the lv name. Resize the filesystem when required (only
+    # relevant on updates)
+    #
+    - name: Format the logical volume
+      community.general.filesystem:
+        dev: "/dev/{{ _vg_name }}/{{ _lv_name }}"
+        force: false
+        fstype: xfs
+        resizefs: true
+    #
+    # Mount volume
+    #
+    - name: Mount the logical volume
+      ansible.posix.mount:
+        fstype: xfs
+        path: "{{ _lv_mount }}"
+        src: "/dev/{{ _vg_name }}/{{ _lv_name }}"
+        state: mounted

@@ -1,0 +1,136 @@
+---
+- name: Run as block
+  when:
+    - disks is defined
+    - lvm is defined
+  block:
+    #
+    # Define the list of disk names. Within the VMWare definition it is not possible to define disks by name, so we need to have
+    # the correlation somewhere. The N'th additional disk in instance defintion has name diskname[N], so the first disk has name
+    # /dev/sdb, and so on
+    #
+    - name: Define list of disk names
+      ansible.builtin.set_fact:
+        disknames:
+          - '/dev/sdb'
+          - '/dev/sdc'
+          - '/dev/sdd'
+          - '/dev/sde'
+          - '/dev/sdf'
+          - '/dev/sdg'
+          - '/dev/sdh'
+          - '/dev/sdi'
+          - '/dev/sdj'
+          - '/dev/sdk'
+          - '/dev/sdl'
+          - '/dev/sdm'
+          - '/dev/sdn'
+          - '/dev/sdo'
+          - '/dev/sdp'
+    #
+    # Create LVM partitions on the additional disks. with_indexed items returns the index of the item and the item itself, so
+    # single_disk wil contain:
+    #
+    # single_disk.0 = index value (0 for the first additional disk, 1 for the second, and so on)
+    # single_disk.1 = disk list item (not used here, but used later in the play)
+    #
+    - name: Use parted to create LVM partitions of all referenced disks on this host
+      become: true
+      loop_control:
+        loop_var: single_disk
+      community.general.parted:
+        device: "{{ disknames[single_disk.0] }}"
+        number: 1
+        flags: [lvm]
+        state: present
+      with_indexed_items:
+        - "{{ disks }}"
+    #
+    # Create a dictionary with all referenced volume groups for the instance and initialize it with an empty list.
+    # If the disk definition is:
+    #
+    #   "disks": [
+    #     {
+    #       "size": 20,
+    #       "vg": "u01"
+    #     },
+    #     {
+    #       "size": 20,
+    #       "vg": "oradata"
+    #     }
+    #   ]
+    #
+    # vgs will have content:
+    #
+    # {
+    #   vgs: {
+    #     "u01": [],
+    #     "oradata" []
+    #   }
+    # }
+    #
+    - name: Create dictionary with all referenced volume groups with an empty list as value
+      loop_control:
+        loop_var: single_disk
+      ansible.builtin.set_fact:
+        vgs: "{{ vgs | default({}) | combine({single_disk['vg']: []}) }}"
+      with_items:
+        - "{{ disks }}"
+    #
+    # Now add the disks to the variable. With the same example as above, the variable will become:
+    #
+    # {
+    #   "vgs": {
+    #     "u01": [
+    #       "/dev/sdb1"
+    #     ],
+    #     "oradata": [
+    #       "/dev/sdc1"
+    #     ]
+    #   }
+    # }
+    #
+    - name: Now add the disks to the previously created dictionary
+      loop_control:
+        loop_var: single_disk
+      ansible.builtin.set_fact:
+        vgs: "{{ vgs | combine( {single_disk.1['vg']: vgs[single_disk.1['vg']] + [disknames[single_disk.0] + '1']}, recursive=True ) }}"
+      with_indexed_items:
+        - "{{ disks }}"
+    #
+    # Create the volume group (single_vg.key is the VG name, single_vg.value is the list of PV's associated with this VG)
+    #
+    - name: Get the list of already created vgs
+      ansible.builtin.command: 'lsblk -lno NAME'
+      register: _active_vgs
+      changed_when: false
+
+    - name: Create the volume groups
+      become: true
+      loop_control:
+        loop_var: single_vg
+      community.general.lvg:
+        vg: "{{ single_vg.key }}"
+        pvs: "{{ single_vg.value }}"
+      with_dict: "{{ vgs }}"
+      when: single_vg.key not in _active_vgs.stdout
+    #
+    # Create the lv's in the inventory file
+    #
+
+    - name: Get active_mountpoints
+      ansible.builtin.command: 'lsblk -lno MOUNTPOINT'
+      register: _active_mounts
+      changed_when: false
+
+    - name: Create logical volumes per volume group
+      ansible.builtin.include_tasks: lvm_lv.yml
+      loop_control:
+        loop_var: lv_definition
+      vars:
+        _vg_name: "{{ lv_definition.vg_name }}"
+        _lv_name: "{{ lv_definition.lv_name }}"
+        _lv_mount: "{{ lv_definition.mountpoint }}"
+        _lv_size: "{{ lv_definition.size }}"
+      loop: "{{ lvm }}"
+      when: lv_definition.mountpoint not in _active_mounts.stdout
